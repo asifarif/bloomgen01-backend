@@ -35,16 +35,11 @@ Respond only in JSON format.
 
     content = response.choices[0].message.content
 
-#    try:
-#        return json.loads(content)
-#    except json.JSONDecodeError:
-#        return {
-#            "error": "Failed to parse LLM response as JSON.",
-#            "raw_response": content
-#        }
+    print("🧠 RAW RESPONSE FROM GROQ:")
+    print(content)  
+
 
     try:
-        # Try to parse proper JSON directly
         return json.loads(content)
 
     except json.JSONDecodeError:
