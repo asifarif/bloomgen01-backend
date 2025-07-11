@@ -1,58 +1,94 @@
 # bloom-backend/app/services/ai_generator.py
 import os
 import json
+import re
 from dotenv import load_dotenv
 from groq import Groq
-import re
+from app.bloom_data import BLOOM_VERBS
+from random import sample
 
-# Load .env variables
+# Load env vars
 load_dotenv()
-
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-GROQ_MODEL = os.getenv("GROQ_MODEL", "llama3-70b-8192")
+GROQ_MODEL = os.getenv("GROQ_MODEL")
 
-def llm_generate_question(clo: str) -> dict:
+
+def get_bloom_level_name(bloom_code: str) -> str:
+    return BLOOM_VERBS.get(bloom_code.upper(), {}).get("name", "Understand")
+
+
+def get_verbs_for_level(bloom_code: str, count: int = 3) -> list[str]:
+    verbs = BLOOM_VERBS.get(bloom_code.upper(), {}).get("verbs", [])
+    return sample(verbs, k=min(count, len(verbs)))
+
+
+def validate_verbs(verbs: list[str], bloom_code: str) -> list[str]:
+    allowed = set(BLOOM_VERBS.get(bloom_code.upper(), {}).get("verbs", []))
+    return [v for v in verbs if v in allowed]
+
+
+def llm_generate_multiple_questions(clo: str, topic: str, bloom_code: str, verbs: list[str] = None):
+    bloom_code = bloom_code.upper()
+    bloom_level = get_bloom_level_name(bloom_code)
+
+    if not verbs:
+        verbs = get_verbs_for_level(bloom_code, 3)
+    else:
+        verbs = validate_verbs(verbs, bloom_code)
+        if len(verbs) < 1:
+            verbs = get_verbs_for_level(bloom_code, 3)
+
     prompt = f"""
-You are an academic assistant. Given the CLO below, respond strictly in valid JSON format. Do not include any natural language, markdown, or commentary.
+You are an educational expert helping a teacher write strong exam questions.
 
-Return the following keys:
-- bloom_code: Bloom taxonomy code (C1–C6)
-- bloom_level: Bloom level name
-- suggested_verb: 1 action verb
-- sample_question: academic question aligned with the CLO
+Please generate **one detailed and distinct academic question** for each verb in this list:
+{verbs}
 
-CLO: "{clo}"
+Constraints:
+- All questions must align with Bloom Level {bloom_code} ({bloom_level})
+- The question should directly assess this CLO: "{clo}"
+- The question must be based on this topic: "{topic}"
+- Use the verb in a pedagogically meaningful way
+- Avoid generic phrases like "Show the topic..."
+- Make each question sound like a real midterm/final exam question
+- Use higher-order thinking even at the C2 level, but stay within the level
+- Each question should be 1–2 complete academic sentences
 
-Respond only with a valid JSON object:
+Respond only with a JSON array, like this:
+[
+  {{
+    "bloom_code": "C2",
+    "bloom_level": "Understand",
+    "suggested_verb": "compare",
+    "sample_question": "Compare the key features of two types of operating systems and explain how they affect system performance."
+  }},
+  ...
+]
 """
-    response = groq_client.chat.completions.create(
-        model=GROQ_MODEL,
-        messages=[{"role": "user", "content": prompt}]
-    )
-
-    content = response.choices[0].message.content
-    print("🧠 RAW RESPONSE FROM GROQ:")
-    print(content)
 
     try:
-        # Safely strip extra space or newlines
-        content_cleaned = content.strip()
-        return json.loads(content_cleaned)
+        response = groq_client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        content = response.choices[0].message.content
+        # print("🧠 RAW GROQ RESPONSE:\n", content)
 
-    except json.JSONDecodeError as e:
-        print("❌ JSON Decode Error:", e)
-        print("⚠️ Falling back to regex extraction")
+        # Extract only the JSON array part from the response
+        match = re.search(r"\[\s*{.*?}\s*\]", content, re.DOTALL)
+        if match:
+            clean_json = match.group(0)
+            return json.loads(clean_json)
+        else:
+            raise ValueError("❌ No valid JSON array found in LLM response.")
 
-        import re
-        bloom_code = re.search(r'"?bloom_code"?\s*:\s*"?(C[1-6])"?', content)
-        bloom_level = re.search(r'"?bloom_level"?\s*:\s*"?(.*?)"?[,}]', content)
-        verb = re.search(r'"?suggested_verb"?\s*:\s*"?(.*?)"?[,}]', content)
-        question = re.search(r'"?sample_question"?\s*:\s*"?(.*?)"?[,}]', content)
-
-        return {
-            "bloom_code": bloom_code.group(1) if bloom_code else "C4",
-            "bloom_level": bloom_level.group(1) if bloom_level else "Analyze",
-            "suggested_verb": verb.group(1) if verb else "analyze",
-            "sample_question": question.group(1) if question else f"Analyze the following to achieve the CLO: {clo}",
-            "raw_response": content
-        }
+    except Exception as e:
+        print("❌ Fallback due to error:", e)
+        return [
+            {
+                "bloom_code": bloom_code,
+                "bloom_level": bloom_level,
+                "suggested_verb": verb,
+                "sample_question": f"{verb.capitalize()} the topic '{topic}' aligned with CLO: {clo}"
+            } for verb in verbs
+        ]
